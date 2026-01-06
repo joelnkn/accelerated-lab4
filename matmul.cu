@@ -56,7 +56,18 @@ __global__ void matmul_l1(
     float const *a,
     float const *b,
     float *c) {
-    /* TODO: your GPU code here */
+
+    int row = blockIdx.y * 16 + threadIdx.y;
+    int col = blockIdx.x * 16 + threadIdx.x;
+
+    if (row < size_i && col < size_j) {
+        float out = 0;
+        for (int i = 0; i < size_k; i++) {
+            out += a[row * size_i + i] * b[i * size_k + col];
+        }
+
+        c[row * size_j + col] = out;
+    }
 }
 
 void launch_matmul_l1(
@@ -66,7 +77,13 @@ void launch_matmul_l1(
     float const *a,
     float const *b,
     float *c) {
-    /* TODO: your CPU code here */
+
+    dim3 threadsPerBlock(16, 16);
+    dim3 blocksPerGrid((size_j + threadsPerBlock.x - 1) / threadsPerBlock.x,
+                       (size_i + threadsPerBlock.y - 1) / threadsPerBlock.y);
+    
+    matrix_multiplication_kernel<<<blocksPerGrid, threadsPerBlock>>>(size_i, size_j, size_k, a, b, c);
+    cudaDeviceSynchronize();
 }
 
 }; // namespace matmul_l1
