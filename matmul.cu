@@ -49,6 +49,7 @@ void cuda_check(cudaError_t code, const char *file, int line) {
 
 namespace matmul_l1 {
 
+constexpr int TILE_SIZE = 32; 
 __global__ void matmul_l1(
     int32_t size_i,
     int32_t size_j,
@@ -56,18 +57,32 @@ __global__ void matmul_l1(
     float const *a,
     float const *b,
     float *c) {
+        
+        __shared__ float a_tile[TILE_SIZE][TILE_SIZE];
+        __shared__ float b_tile[TILE_SIZE][TILE_SIZE];
+        // __shared__ float c_tile[TILE_SIZE][TILE_SIZE];
+        
+        auto tx = threadIdx.x;
+        auto ty = threadIdx.y;
 
-    int row = blockIdx.y * 16 + threadIdx.y;
-    int col = blockIdx.x * 16 + threadIdx.x;
+        int row = blockIdx.y * TILE_SIZE + threadIdx.y;
+        int col = blockIdx.x * TILE_SIZE + threadIdx.x;
 
-    if (row < size_i && col < size_j) {
         float out = 0;
-        for (int i = 0; i < size_k; i++) {
-            out += a[row * size_i + i] * b[i * size_k + col];
-        }
+        for (int outK = 0; outK < size_k / TILE_SIZE; outK++) {
+            a_tile[ty][tx] = a[row * size_k + (outK * TILE_SIZE + tx)];
+            b_tile[ty][tx] = b[(outK * TILE_SIZE + ty) * size_j + col];
+            __syncthreads();  // make sure you get the all data
 
-        c[row * size_j + col] = out;
-    }
+            for (int k = 0; k < TILE_SIZE; k++) {
+                out += a_tile[ty][k] * b_tile[k][tx];
+            }
+            __syncthreads(); // make sure you don't overwrite the scratch while someone is still using it
+        }
+        
+        if (row < size_i && col < size_j) {
+            c[row * size_j + col] = out;
+        }
 }
 
 void launch_matmul_l1(
@@ -78,7 +93,7 @@ void launch_matmul_l1(
     float const *b,
     float *c) {
 
-    dim3 threadsPerBlock(16, 16);
+    dim3 threadsPerBlock(TILE_SIZE, TILE_SIZE);
     dim3 blocksPerGrid((size_j + threadsPerBlock.x - 1) / threadsPerBlock.x,
                        (size_i + threadsPerBlock.y - 1) / threadsPerBlock.y);
     
