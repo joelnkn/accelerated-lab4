@@ -82,7 +82,7 @@ void launch_matmul_l1(
     dim3 blocksPerGrid((size_j + threadsPerBlock.x - 1) / threadsPerBlock.x,
                        (size_i + threadsPerBlock.y - 1) / threadsPerBlock.y);
     
-    matrix_multiplication_kernel<<<blocksPerGrid, threadsPerBlock>>>(size_i, size_j, size_k, a, b, c);
+    matmul_l1<<<blocksPerGrid, threadsPerBlock>>>(size_i, size_j, size_k, a, b, c);
     cudaDeviceSynchronize();
 }
 
