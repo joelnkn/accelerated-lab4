@@ -60,7 +60,6 @@ __global__ void matmul_l1(
         
         __shared__ float a_tile[TILE_SIZE][TILE_SIZE];
         __shared__ float b_tile[TILE_SIZE][TILE_SIZE];
-        // __shared__ float c_tile[TILE_SIZE][TILE_SIZE];
         
         auto tx = threadIdx.x;
         auto ty = threadIdx.y;
@@ -83,6 +82,11 @@ __global__ void matmul_l1(
         if (row < size_i && col < size_j) {
             c[row * size_j + col] = out;
         }
+
+        // if (blockIdx.x == 0 && blockIdx.y == 0 &&
+        //     threadIdx.x == 0 && threadIdx.y == 0) {
+        //     printf("hello %f\n", c[1]);
+        // }
 }
 
 void launch_matmul_l1(
@@ -93,12 +97,12 @@ void launch_matmul_l1(
     float const *b,
     float *c) {
 
-    dim3 threadsPerBlock(TILE_SIZE, TILE_SIZE);
-    dim3 blocksPerGrid((size_j + threadsPerBlock.x - 1) / threadsPerBlock.x,
-                       (size_i + threadsPerBlock.y - 1) / threadsPerBlock.y);
-    
-    matmul_l1<<<blocksPerGrid, threadsPerBlock>>>(size_i, size_j, size_k, a, b, c);
-    cudaDeviceSynchronize();
+        dim3 threadsPerBlock(TILE_SIZE, TILE_SIZE);
+        dim3 blocksPerGrid((size_j + threadsPerBlock.x - 1) / threadsPerBlock.x,
+                        (size_i + threadsPerBlock.y - 1) / threadsPerBlock.y);
+        
+        matmul_l1<<<blocksPerGrid, threadsPerBlock>>>(size_i, size_j, size_k, a, b, c);
+        cudaDeviceSynchronize();
 }
 
 }; // namespace matmul_l1
@@ -108,6 +112,8 @@ void launch_matmul_l1(
 
 namespace matmul_l1_reg {
 
+constexpr int TILE_SIZE = 32; 
+constexpr int MT = 2;  // microtile dims
 __global__ void matmul_l1_reg(
     int32_t size_i,
     int32_t size_j,
@@ -115,7 +121,84 @@ __global__ void matmul_l1_reg(
     float const *a,
     float const *b,
     float *c) {
-    /* TODO: your GPU code here */
+
+        constexpr int tsz = TILE_SIZE * MT;  // total size (scratch space)
+
+        __shared__ float a_tile[tsz][tsz];
+        __shared__ float b_tile[tsz][tsz];
+        
+        float a_mt[MT][MT];
+        float b_mt[MT][MT];
+
+        auto tx = threadIdx.x;
+        auto ty = threadIdx.y;
+
+        int row = blockIdx.y * tsz + threadIdx.y;
+        int col = blockIdx.x * tsz + threadIdx.x;
+
+        float out[MT][MT];
+        for (int mi = 0; mi < MT; mi++) {
+            for (int mj = 0; mj < MT; mj++) {
+                out[mi][mj] = 0;
+            }
+        }
+        for (int outK = 0; outK < size_k / tsz; outK++) {
+            // Load L1
+            for (int mi = 0; mi < MT; mi++) {
+                for (int mj = 0; mj < MT; mj++) {
+                    // the original matrix position
+                    int i = row + mi * TILE_SIZE;
+                    int j = col + mj * TILE_SIZE;
+                    
+                    // large tile position
+                    int ti = ty + mi * TILE_SIZE;
+                    int tj = tx + mj * TILE_SIZE;
+
+                    a_tile[ti][tj] = a[i * size_k + (outK * tsz + tj)];  // coalesced loading [tj linear in tx]
+                    b_tile[ti][tj] = b[(outK * tsz + ti) * size_j + j];  // coalesced loading [j linear in tx]
+                }
+            }
+
+            __syncthreads();  // make sure you get the all data
+
+            for (int k = 0; k < TILE_SIZE; k++) {
+                // Load registers
+                for (int mi = 0; mi < MT; mi++) {
+                    for (int mj = 0; mj < MT; mj++) {
+                        a_mt[mi][mj] = a_tile[ty * MT + mi][k * MT + mj];
+                        b_mt[mi][mj] = b_tile[k * MT + mi][tx * MT + mj];
+                    }
+                }
+                
+                // Microtile matmul
+                for (int mi = 0; mi < MT; mi++) {
+                    for (int mj = 0; mj < MT; mj++) {
+                        for (int mk = 0; mk < MT; mk++) {
+                            out[mi][mj] += a_mt[mi][mk] * b_mt[mk][mj];
+                        }
+                    }
+                }
+            }
+
+            // out += a_tile[ty][k] * b_tile[k][tx];
+            __syncthreads(); // make sure you don't overwrite the scratch while someone is still using it
+        }
+        
+        for (int mi = 0; mi < MT; mi++) {
+            for (int mj = 0; mj < MT; mj++) {
+                int _r = blockIdx.y * tsz + ty * MT + mi;
+                int _c = blockIdx.x * tsz + tx * MT + mj;
+                
+                if (_r < size_i && _c < size_j) {
+                    c[_r * size_j + _c] = out[mi][mj];
+                }
+            }
+        }
+        
+        // if (blockIdx.x == 0 && blockIdx.y == 0 &&
+        //     threadIdx.x == 0 && threadIdx.y == 0) {
+        //     printf("hello %f\n", c[0]);
+        // }
 }
 
 void launch_matmul_l1_reg(
@@ -125,7 +208,15 @@ void launch_matmul_l1_reg(
     float const *a,
     float const *b,
     float *c) {
-    /* TODO: your CPU code here */
+        dim3 threadsPerBlock(TILE_SIZE, TILE_SIZE);
+        
+        int tsz_x = threadsPerBlock.x * MT;
+        int tsz_y = threadsPerBlock.y * MT;
+        dim3 blocksPerGrid((size_j + tsz_x - 1) / tsz_x,
+                        (size_i + tsz_y - 1) / tsz_y);
+        
+        matmul_l1_reg<<<blocksPerGrid, threadsPerBlock>>>(size_i, size_j, size_k, a, b, c);
+        cudaDeviceSynchronize();
 }
 
 }; // namespace matmul_l1_reg
